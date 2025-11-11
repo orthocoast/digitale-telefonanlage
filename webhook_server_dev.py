@@ -412,6 +412,19 @@ DASHBOARD_TEMPLATE = """
             font-weight: 500;
         }
 
+        .category-badge {
+            display: inline-flex;
+            align-items: center;
+            gap: 0.4rem;
+            padding: 0.4rem 0.8rem;
+            background: linear-gradient(135deg, #f093fb 0%, #f5576c 100%);
+            color: white;
+            border-radius: 8px;
+            font-size: 0.85rem;
+            font-weight: 500;
+            box-shadow: 0 2px 4px rgba(240, 147, 251, 0.2);
+        }
+
         .name-cell {
             display: flex;
             align-items: center;
@@ -609,6 +622,7 @@ DASHBOARD_TEMPLATE = """
                             <th><i class="bi bi-calendar3"></i>Geburtsdatum</th>
                             <th><i class="bi bi-telephone-fill"></i>Telefonnummer</th>
                             <th><i class="bi bi-chat-left-text-fill"></i>Anliegen</th>
+                            <th><i class="bi bi-tags-fill"></i>Kategorie</th>
                             <th><i class="bi bi-trash3"></i>Löschen</th>
                         </tr>
                     </thead>
@@ -627,6 +641,13 @@ DASHBOARD_TEMPLATE = """
                             <td><span class="phone-badge"><i class="bi bi-phone"></i>{{ call.phone }}</span></td>
                             <td><span class="reason-badge"><i class="bi bi-chat-dots"></i>{{ call.call_reason }}</span></td>
                             <td>
+                                {% if call.category %}
+                                <span class="category-badge"><i class="bi bi-tags"></i>{{ call.category }}</span>
+                                {% else %}
+                                <span style="color: #999;">-</span>
+                                {% endif %}
+                            </td>
+                            <td>
                                 <button class="delete-btn">
                                     <i class="bi bi-trash3-fill"></i>
                                 </button>
@@ -634,7 +655,7 @@ DASHBOARD_TEMPLATE = """
                         </tr>
                         {% else %}
                         <tr>
-                            <td colspan="7" class="no-results">
+                            <td colspan="8" class="no-results">
                                 <i class="bi bi-inbox"></i>
                                 <p>Noch keine Anrufe in der Datenbank.</p>
                             </td>
@@ -811,7 +832,8 @@ def init_db():
         caller_dob TEXT,
         phone TEXT,
         call_reason TEXT,
-        insurance_provider TEXT
+        insurance_provider TEXT,
+        category TEXT
     );
     """)
     db.commit()
@@ -841,9 +863,19 @@ def import_logs_to_db():
                     continue
 
                 body = log_entry.get("body", {})
+
+                # Extract category (comes as array, store as comma-separated string)
+                category_data = body.get("category")
+                category_str = None
+                if category_data:
+                    if isinstance(category_data, list):
+                        category_str = ", ".join(category_data)
+                    else:
+                        category_str = str(category_data)
+
                 cursor.execute("""
-                INSERT INTO calls (log_ts, timestamp, caller_name, caller_gender, caller_dob, phone, call_reason, insurance_provider)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                INSERT INTO calls (log_ts, timestamp, caller_name, caller_gender, caller_dob, phone, call_reason, insurance_provider, category)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """, (
                     log_ts,
                     int(log_ts),
@@ -852,7 +884,8 @@ def import_logs_to_db():
                     body.get("caller_dob"),
                     body.get("phone"),
                     body.get("call_reason"),
-                    body.get("insurance_provider")
+                    body.get("insurance_provider"),
+                    category_str
                 ))
                 print(f"Neuer Anruf von {body.get('caller_name')} importiert.")
             except json.JSONDecodeError:
@@ -906,9 +939,19 @@ def placetel_webhook():
         # Write to database
         db = get_db()
         cursor = db.cursor()
+
+        # Extract category (comes as array, store as comma-separated string)
+        category_data = data.get("category")
+        category_str = None
+        if category_data:
+            if isinstance(category_data, list):
+                category_str = ", ".join(category_data)
+            else:
+                category_str = str(category_data)
+
         cursor.execute("""
-        INSERT INTO calls (log_ts, timestamp, caller_name, caller_gender, caller_dob, phone, call_reason, insurance_provider)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+        INSERT INTO calls (log_ts, timestamp, caller_name, caller_gender, caller_dob, phone, call_reason, insurance_provider, category)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
         """, (
             log_ts,
             int(log_ts),
@@ -917,7 +960,8 @@ def placetel_webhook():
             data.get("caller_dob"),
             data.get("phone"),
             data.get("call_reason"),
-            data.get("insurance_provider")
+            data.get("insurance_provider"),
+            category_str
         ))
         db.commit()
         db.close()
