@@ -12,15 +12,23 @@ app.config["JSON_AS_ASCII"] = False
 
 # --- Konfiguration ---
 PORT = 54351
-SECRET = "inmeinemgarten" # Placetel Secret - bleibt vorerst hardcoded
+
+# Security: Secrets must be provided via environment variables
+SECRET = os.environ.get('PLACETEL_SECRET')
+if not SECRET:
+    raise ValueError("PLACETEL_SECRET environment variable is required. Please set it before starting the server.")
+
 LOG_FILE = pathlib.Path(__file__).with_name("placetel_logs.jsonl")
 DB_FILE = pathlib.Path(__file__).with_name("database.db")
 
 # --- Dashboard Authentifizierung ---
 auth = HTTPBasicAuth()
 
-DASHBOARD_USERNAME = os.environ.get('DASHBOARD_USERNAME', 'admin')
-DASHBOARD_PASSWORD = os.environ.get('DASHBOARD_PASSWORD', 'password')
+# Security: Dashboard credentials must be provided via environment variables (no defaults)
+DASHBOARD_USERNAME = os.environ.get('DASHBOARD_USERNAME')
+DASHBOARD_PASSWORD = os.environ.get('DASHBOARD_PASSWORD')
+if not DASHBOARD_USERNAME or not DASHBOARD_PASSWORD:
+    raise ValueError("DASHBOARD_USERNAME and DASHBOARD_PASSWORD environment variables are required. Please set them before starting the server.")
 
 @auth.verify_password
 def verify_password(username, password):
@@ -865,38 +873,61 @@ def format_timestamp(ts):
 @app.post("/placetel")
 def placetel_webhook():
     """Empfängt den Webhook, schreibt ins Log und in die DB."""
+    # Security: Verify Bearer token
     if request.headers.get("Authorization") != f"Bearer {SECRET}":
         return jsonify({"error": "forbidden"}), 403
-    
-    data = request.get_json(silent=True)
+
+    # Security: Verify Content-Type
+    if not request.is_json:
+        return jsonify({"error": "Content-Type must be application/json"}), 400
+
+    # Security: Parse JSON with error handling
+    try:
+        data = request.get_json()
+    except Exception as e:
+        return jsonify({"error": "Invalid JSON", "details": str(e)}), 400
+
     if not data:
-        return jsonify({"error": "bad request"}), 400
+        return jsonify({"error": "Empty request body"}), 400
+
+    # Security: Validate required fields (basic schema validation)
+    # At minimum, we should have some caller information
+    if not isinstance(data, dict):
+        return jsonify({"error": "Request body must be a JSON object"}), 400
 
     log_ts = time.time()
     log_entry = {"ts": log_ts, "body": data}
 
-    with open(LOG_FILE, "a", encoding="utf-8") as f:
-        f.write(json.dumps(log_entry, ensure_ascii=False) + "\n")
+    try:
+        # Write to log file
+        with open(LOG_FILE, "a", encoding="utf-8") as f:
+            f.write(json.dumps(log_entry, ensure_ascii=False) + "\n")
 
-    db = get_db()
-    cursor = db.cursor()
-    cursor.execute("""
-    INSERT INTO calls (log_ts, timestamp, caller_name, caller_gender, caller_dob, phone, call_reason, insurance_provider)
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-    """, (
-        log_ts,
-        int(log_ts),
-        data.get("caller_name"),
-        data.get("caller_gender"),
-        data.get("caller_dob"),
-        data.get("phone"),
-        data.get("call_reason"),
-        data.get("insurance_provider")
-    ))
-    db.commit()
-    db.close()
-    
-    return jsonify({"status": "ok"}), 200
+        # Write to database
+        db = get_db()
+        cursor = db.cursor()
+        cursor.execute("""
+        INSERT INTO calls (log_ts, timestamp, caller_name, caller_gender, caller_dob, phone, call_reason, insurance_provider)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+        """, (
+            log_ts,
+            int(log_ts),
+            data.get("caller_name"),
+            data.get("caller_gender"),
+            data.get("caller_dob"),
+            data.get("phone"),
+            data.get("call_reason"),
+            data.get("insurance_provider")
+        ))
+        db.commit()
+        db.close()
+
+        return jsonify({"status": "ok", "log_ts": log_ts}), 200
+
+    except Exception as e:
+        # Log error but don't expose internal details to client
+        print(f"Error processing webhook: {e}")
+        return jsonify({"error": "Internal server error"}), 500
 
 @app.get("/")
 def health_check():
@@ -912,6 +943,7 @@ def dashboard():
     return render_template_string(DASHBOARD_TEMPLATE, calls=calls)
 
 @app.post("/call/<int:call_id>/status")
+@auth.login_required
 def update_call_status(call_id):
     """Aktualisiert den Status eines Anrufs (new/done)."""
     data = request.get_json()
@@ -924,15 +956,16 @@ def update_call_status(call_id):
     cursor = db.cursor()
     cursor.execute("UPDATE calls SET status = ? WHERE id = ?", (new_status, call_id))
     db.commit()
-    
+
     if cursor.rowcount == 0:
         db.close()
         return jsonify({"status": "error", "message": "Call not found"}), 404
-    
+
     db.close()
     return jsonify({"status": "ok"})
 
 @app.post("/call/<int:call_id>/delete")
+@auth.login_required
 def delete_call(call_id):
     """Löscht einen Anruf aus der Datenbank."""
     db = get_db()
@@ -948,6 +981,7 @@ def delete_call(call_id):
     return jsonify({"status": "ok"})
 
 @app.post("/import-logs")
+@auth.login_required
 def trigger_import():
     """Manueller Endpunkt, um den Import aus der JSONL-Datei anzustoßen."""
     import_logs_to_db()
