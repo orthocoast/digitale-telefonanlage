@@ -21,7 +21,17 @@ Die Anwendung basiert auf einer einfachen und robusten Architektur:
 - **Client-seitige Suche:** Ein Suchfeld ermöglicht das Filtern der angezeigten Anrufe in Echtzeit.
 - **Auto-Refresh:** Das Dashboard aktualisiert sich automatisch, um neue Anrufe anzuzeigen (aktuell alle 30 Sekunden).
 
-## 4. Wichtige Dateien
+## 4. Dashboard UI Verbesserungen
+
+Das Dashboard wurde mit einer modernen und visuell ansprechenden Benutzeroberfläche neu gestaltet:
+
+- **Farbiges modernes Design:** Gradienteneffekte und moderne Farbschemata für eine zeitgemäße Optik.
+- **Statistik-Karten:** Übersichtliche Karten zeigen Gesamtzahl, offene Anrufe, erledigte Anrufe und heutige Anrufe auf einen Blick.
+- **Verbesserte Tabelle:** Icons und Badges für bessere visuelle Kennzeichnung von Status und Informationen.
+- **Live-Uhr in der Navigationsleiste:** Echtzeit-Uhrzeitanzeige für bessere Zeitverfolgung.
+- **Sanfte Animationen:** Flüssige Übergänge und Animationen für eine bessere Benutzerfreundlichkeit.
+
+## 5. Wichtige Dateien
 
 - `webhook_server_dev.py`: Das **Entwicklungsskript**. Alle neuen Features und Änderungen werden hier implementiert und getestet.
 - `webhook_server_prod.py`: Das **Produktionsskript**. Es repräsentiert die stabile, für den Einsatz freigegebene Version der Anwendung.
@@ -30,7 +40,7 @@ Die Anwendung basiert auf einer einfachen und robusten Architektur:
 - `call-dashboard-bauplan.md`: Das ursprüngliche, detaillierte Planungsdokument für die Architektur.
 - `GEMINI.md`: Dokumentation über den Entwicklungsprozess mit dem Gemini-Agenten.
 
-## 5. Anleitung zum Starten
+## 6. Anleitung zum Starten
 
 Um die Anwendung (im Entwicklungsmodus) zu starten, folgen Sie diesen Schritten:
 
@@ -68,7 +78,7 @@ Um den lokalen Server für den Placetel-Webhook aus dem Internet erreichbar zu m
     ```
 3.  `ngrok` zeigt Ihnen eine öffentliche URL an (z.B. `https://<zufall>.ngrok.io`). Diese URL müssen Sie in Ihrem Placetel-Account als Webhook-Ziel eintragen.
 
-## 6. Entwicklungsprozess
+## 7. Entwicklungsprozess
 
 Die Entwicklung folgt einem einfachen `dev` -> `prod` Modell:
 
