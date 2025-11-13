@@ -87,15 +87,44 @@ def save_caller_number(caller_number, called_number):
 
     timestamp = int(time.time())
 
-    cursor.execute("""
-    INSERT INTO phone_lookup (timestamp, caller_number, called_number)
-    VALUES (?, ?, ?)
-    """, (timestamp, caller_number, called_number))
+    # DUPLIKATS-FILTER: Verhindere mehrfache Speicherung der gleichen Nummer
+    # FritzBox sendet oft mehrere RING-Events pro Anruf (bei jedem Klingelton!)
+    # Prüfe ob diese Nummer in den letzten 10 Sekunden bereits gespeichert wurde
+    duplicate_window = 10  # Sekunden
+    min_timestamp = timestamp - duplicate_window
 
-    db.commit()
-    db.close()
+    # BEGIN IMMEDIATE: Atomische Transaktion gegen Race Conditions
+    try:
+        db.execute("BEGIN IMMEDIATE")
 
-    log(f"📞 Anruf gespeichert: {caller_number} → {called_number}")
+        cursor.execute("""
+        SELECT id FROM phone_lookup
+        WHERE caller_number = ?
+        AND timestamp >= ?
+        LIMIT 1
+        """, (caller_number, min_timestamp))
+
+        if cursor.fetchone() is not None:
+            db.rollback()
+            db.close()
+            log(f"🔄 Duplikat ignoriert: {caller_number} (bereits gespeichert)")
+            return
+
+        # Nummer ist neu → speichern
+        cursor.execute("""
+        INSERT INTO phone_lookup (timestamp, caller_number, called_number)
+        VALUES (?, ?, ?)
+        """, (timestamp, caller_number, called_number))
+
+        db.commit()
+        db.close()
+
+        log(f"📞 Anruf gespeichert: {caller_number} → {called_number}")
+
+    except Exception as e:
+        db.rollback()
+        db.close()
+        log(f"❌ Fehler beim Speichern: {e}")
 
 def cleanup_old_entries():
     """Löscht alte Lookup-Einträge (älter als 24 Stunden)."""
@@ -285,9 +314,14 @@ def find_real_phone_number(webhook_timestamp, time_window=300):
     """
     Sucht die echte Telefonnummer für einen Webhook-Zeitpunkt.
 
+    Diese Funktion verwendet FIFO (First In, First Out) Matching:
+    - Nimmt immer den ÄLTESTEN ungematchten Anruf
+    - Verhindert dass mehrere Webhooks die gleiche Nummer bekommen
+    - Funktioniert wie eine Warteschlange
+
     Args:
-        webhook_timestamp: Unix-Timestamp des Webhooks
-        time_window: Zeitfenster in Sekunden (default: 5 Minuten)
+        webhook_timestamp: Unix-Timestamp des Webhooks (nur für Zeitfenster-Prüfung)
+        time_window: Maximales Zeitfenster in Sekunden (default: 5 Minuten)
 
     Returns:
         Echte Telefonnummer oder None
@@ -295,35 +329,38 @@ def find_real_phone_number(webhook_timestamp, time_window=300):
     db = get_db()
     cursor = db.cursor()
 
-    # Suche Anrufe im Zeitfenster (±5 Minuten)
+    # Zeitfenster: Nur Anrufe der letzten X Minuten berücksichtigen
+    # (verhindert uralte Einträge zu matchen)
     min_time = webhook_timestamp - time_window
-    max_time = webhook_timestamp + time_window
 
+    # FIFO: Nimm den ÄLTESTEN ungematchten Eintrag (ORDER BY id ASC)
+    # Nicht nach Zeitstempel-Nähe, sondern strikt nach Reihenfolge!
     cursor.execute("""
-    SELECT caller_number, timestamp
+    SELECT id, caller_number, timestamp
     FROM phone_lookup
-    WHERE timestamp BETWEEN ? AND ?
+    WHERE timestamp >= ?
     AND matched = 0
-    ORDER BY ABS(timestamp - ?) ASC
+    ORDER BY id ASC
     LIMIT 1
-    """, (min_time, max_time, webhook_timestamp))
+    """, (min_time,))
 
     result = cursor.fetchone()
 
     if result:
-        caller_number = result[0]
+        entry_id = result[0]
+        caller_number = result[1]
 
-        # Als "matched" markieren
+        # Als "matched" markieren (wichtig: per ID, nicht timestamp!)
         cursor.execute("""
         UPDATE phone_lookup
         SET matched = 1
-        WHERE timestamp = ?
-        """, (result[1],))
+        WHERE id = ?
+        """, (entry_id,))
 
         db.commit()
         db.close()
 
-        log(f"🔗 Echte Nummer gefunden: {caller_number}")
+        log(f"🔗 Echte Nummer gefunden (FIFO #{entry_id}): {caller_number}")
         return caller_number
 
     db.close()

@@ -820,16 +820,63 @@ def get_db():
     db.row_factory = sqlite3.Row  # Ermöglicht den Zugriff auf Spalten per Namen
     return db
 
+def extract_phone_from_content(content):
+    """
+    Extrahiert die Rückrufnummer aus dem content-Text des Webhooks.
+
+    Die echte Telefonnummer steht oft im content als:
+    - "Rückrufnummer: +49xxx..."
+    - "R\u00fcckrufnummer: +49xxx..."
+    - "Telefonnummer: 0xxx..."
+
+    Das ist die ZUVERLÄSSIGSTE Methode, da die Nummer direkt vom
+    digitalen Assistenten erfasst wurde!
+
+    Args:
+        content: Der content-String aus dem Webhook
+
+    Returns:
+        Telefonnummer als String oder None
+    """
+    if not content:
+        return None
+
+    import re
+
+    # Pattern für verschiedene Schreibweisen
+    patterns = [
+        r'[Rr]ückrufnummer:\s*(\+?\d[\d\s\-\(\)]+)',
+        r'[Tt]elefonnummer:\s*(\+?\d[\d\s\-\(\)]+)',
+        r'[Rr]ückruf:\s*(\+?\d[\d\s\-\(\)]+)',
+    ]
+
+    for pattern in patterns:
+        match = re.search(pattern, content)
+        if match:
+            # Telefonnummer gefunden - bereinigen (nur Ziffern und +)
+            phone = match.group(1)
+            phone = re.sub(r'[\s\-\(\)]', '', phone)  # Leerzeichen, -, ( ) entfernen
+
+            # Nur gültige Nummern (mindestens 6 Ziffern)
+            if len(re.sub(r'[^\d]', '', phone)) >= 6:
+                print(f"📱 Rückrufnummer aus content extrahiert: {phone}")
+                return phone
+
+    return None
+
 def find_real_phone_number(webhook_timestamp, time_window=300):
     """
     Sucht die echte Telefonnummer aus der FritzBox-Lookup-Tabelle.
 
-    Diese Funktion wird verwendet, wenn eine Rufnummerweiterleitung aktiv ist
-    und Placetel nur die Praxisnummer statt der echten Anrufernummer sendet.
+    Diese Funktion verwendet ZEITBASIERTES MATCHING:
+    - Nimmt die Nummer die ZEITLICH AM NÄCHSTEN zum Webhook-Timestamp ist
+    - Nicht FIFO (ältester), da Webhooks nicht in richtiger Reihenfolge ankommen können
+    - Verhindert dass mehrere Webhooks die gleiche Nummer bekommen (atomische Transaktion)
+    - Zeitfenster: Nur Anrufe der letzten 5 Minuten
 
     Args:
         webhook_timestamp: Unix-Timestamp des Webhooks
-        time_window: Zeitfenster in Sekunden (default: 5 Minuten)
+        time_window: Maximales Zeitfenster in Sekunden (default: 5 Minuten = 300s)
 
     Returns:
         Echte Telefonnummer oder None
@@ -838,39 +885,67 @@ def find_real_phone_number(webhook_timestamp, time_window=300):
         db = get_db()
         cursor = db.cursor()
 
-        # Suche Anrufe im Zeitfenster (±5 Minuten)
+        # Zeitfenster: Nur Anrufe der letzten X Minuten berücksichtigen
+        # (verhindert uralte Einträge zu matchen)
         min_time = webhook_timestamp - time_window
-        max_time = webhook_timestamp + time_window
 
-        cursor.execute("""
-        SELECT caller_number, timestamp
-        FROM phone_lookup
-        WHERE timestamp BETWEEN ? AND ?
-        AND matched = 0
-        ORDER BY ABS(timestamp - ?) ASC
-        LIMIT 1
-        """, (min_time, max_time, webhook_timestamp))
+        # WICHTIG: Exklusive Transaktion starten (verhindert Race Conditions!)
+        # BEGIN IMMEDIATE sperrt die DB sofort für andere Schreibzugriffe
+        db.execute("BEGIN IMMEDIATE")
 
-        result = cursor.fetchone()
-
-        if result:
-            caller_number = result['caller_number']
-
-            # Als "matched" markieren
+        try:
+            # ZEITBASIERTES MATCHING: Nimm die Nummer die ZEITLICH AM NÄCHSTEN zum Webhook ist
+            # Nicht FIFO (ältester), sondern "closest match" im Zeitfenster!
+            # Das löst das Problem wenn Webhooks nicht in der richtigen Reihenfolge ankommen
             cursor.execute("""
-            UPDATE phone_lookup
-            SET matched = 1
-            WHERE timestamp = ?
-            """, (result['timestamp'],))
+            SELECT id, caller_number, timestamp
+            FROM phone_lookup
+            WHERE timestamp >= ?
+            AND matched = 0
+            ORDER BY ABS(timestamp - ?) ASC
+            LIMIT 1
+            """, (min_time, webhook_timestamp))
 
-            db.commit()
+            result = cursor.fetchone()
+
+            if result:
+                entry_id = result['id']
+                caller_number = result['caller_number']
+
+                # Als "matched" markieren (wichtig: per ID, nicht timestamp!)
+                # Diese Operation ist atomar innerhalb der IMMEDIATE Transaktion
+                cursor.execute("""
+                UPDATE phone_lookup
+                SET matched = 1
+                WHERE id = ?
+                AND matched = 0
+                """, (entry_id,))
+
+                # Prüfe ob UPDATE erfolgreich war (könnte von anderem Thread bereits gematcht sein)
+                if cursor.rowcount == 0:
+                    # Ein anderer Thread hat diesen Eintrag bereits gematcht!
+                    db.rollback()
+                    db.close()
+                    print(f"⚠️  Race Condition: Eintrag #{entry_id} bereits gematcht - versuche erneut")
+                    # Rekursiver Aufruf, um nächsten freien Eintrag zu holen
+                    return find_real_phone_number(webhook_timestamp, time_window)
+
+                db.commit()
+                db.close()
+
+                time_diff = abs(webhook_timestamp - result['timestamp'])
+                print(f"🔗 Echte Nummer gefunden (ID #{entry_id}, Δ{time_diff}s): {caller_number}")
+                return caller_number
+
+            else:
+                db.rollback()
+                db.close()
+                return None
+
+        except Exception as e:
+            db.rollback()
             db.close()
-
-            print(f"🔗 Echte Nummer aus FritzBox-Monitor gefunden: {caller_number}")
-            return caller_number
-
-        db.close()
-        return None
+            raise e
 
     except sqlite3.OperationalError:
         # Tabelle phone_lookup existiert nicht - FritzBox Monitor nicht aktiv
@@ -948,10 +1023,20 @@ def import_logs_to_db():
                     else:
                         category_str = str(category_data)
 
-                # Get phone number - check if it's the practice number (from call forwarding)
-                phone_number = body.get("phone")
+                # STRATEGIE 1: Versuche Rückrufnummer aus content zu extrahieren (BESTE Methode!)
+                phone_number = None
+                content = body.get("content")
 
-                # If phone contains practice number, try to find real caller number from FritzBox monitor
+                if content:
+                    extracted_phone = extract_phone_from_content(content)
+                    if extracted_phone:
+                        phone_number = extracted_phone
+
+                # STRATEGIE 2: Falls keine Nummer im content, nutze phone-Feld
+                if not phone_number:
+                    phone_number = body.get("phone")
+
+                # STRATEGIE 3: Falls phone die Praxisnummer enthält, versuche FritzBox Lookup (Fallback)
                 if phone_number and PRAXIS_NUMBER in phone_number:
                     real_number = find_real_phone_number(int(log_ts))
 
@@ -959,6 +1044,12 @@ def import_logs_to_db():
                         phone_number = real_number
                     else:
                         phone_number = "Weiterleitung (Praxis)"
+
+                # Call reason: Nutze call_reason, falls vorhanden, sonst content als Fallback
+                call_reason = body.get("call_reason")
+                if not call_reason and content:
+                    # Fallback: Nutze content, aber kürze auf max 200 Zeichen
+                    call_reason = content[:200] if len(content) > 200 else content
 
                 cursor.execute("""
                 INSERT INTO calls (log_ts, timestamp, caller_name, caller_gender, caller_dob, phone, call_reason, insurance_provider, category)
@@ -970,7 +1061,7 @@ def import_logs_to_db():
                     body.get("caller_gender"),
                     body.get("caller_dob"),
                     phone_number,
-                    body.get("call_reason"),
+                    call_reason,
                     body.get("insurance_provider"),
                     category_str
                 ))
@@ -1036,20 +1127,37 @@ def placetel_webhook():
             else:
                 category_str = str(category_data)
 
-        # Get phone number - check if it's the practice number (from call forwarding)
-        phone_number = data.get("phone")
+        # STRATEGIE 1: Versuche Rückrufnummer aus content zu extrahieren (BESTE Methode!)
+        phone_number = None
+        content = data.get("content")
 
-        # If phone contains practice number, try to find real caller number from FritzBox monitor
+        if content:
+            extracted_phone = extract_phone_from_content(content)
+            if extracted_phone:
+                phone_number = extracted_phone
+                print(f"✅ Nummer aus content extrahiert: {phone_number}")
+
+        # STRATEGIE 2: Falls keine Nummer im content, nutze phone-Feld
+        if not phone_number:
+            phone_number = data.get("phone")
+
+        # STRATEGIE 3: Falls phone die Praxisnummer enthält, versuche FritzBox Lookup (Fallback)
         if phone_number and PRAXIS_NUMBER in phone_number:
             print(f"⚠️  Praxisnummer erkannt in Webhook: {phone_number}")
             real_number = find_real_phone_number(int(log_ts))
 
             if real_number:
                 phone_number = real_number
-                print(f"✅ Ersetzt durch echte Nummer: {real_number}")
+                print(f"✅ Ersetzt durch FritzBox-Nummer: {real_number}")
             else:
                 print(f"ℹ️  Keine echte Nummer gefunden - verwende 'Weiterleitung (Praxis)'")
                 phone_number = "Weiterleitung (Praxis)"
+
+        # Call reason: Nutze call_reason, falls vorhanden, sonst content als Fallback
+        call_reason = data.get("call_reason")
+        if not call_reason and content:
+            # Fallback: Nutze content, aber kürze auf max 200 Zeichen
+            call_reason = content[:200] if len(content) > 200 else content
 
         cursor.execute("""
         INSERT INTO calls (log_ts, timestamp, caller_name, caller_gender, caller_dob, phone, call_reason, insurance_provider, category)
@@ -1061,7 +1169,7 @@ def placetel_webhook():
             data.get("caller_gender"),
             data.get("caller_dob"),
             phone_number,
-            data.get("call_reason"),
+            call_reason,
             data.get("insurance_provider"),
             category_str
         ))

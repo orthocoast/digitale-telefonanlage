@@ -27,7 +27,7 @@ sleep 2
 
 # 2. Webhook Server starten
 echo "🌐 Starte Webhook Server..."
-export $(cat .env | xargs)
+export $(grep -v '^#' .env | grep -v '^$' | xargs)
 nohup python3 webhook_server_dev.py > webhook_server.log 2>&1 &
 WEBHOOK_PID=$!
 echo $WEBHOOK_PID > webhook_server.pid
