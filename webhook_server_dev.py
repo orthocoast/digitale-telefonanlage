@@ -21,6 +21,9 @@ if not SECRET:
 LOG_FILE = pathlib.Path(__file__).with_name("placetel_logs.jsonl")
 DB_FILE = pathlib.Path(__file__).with_name("database.db")
 
+# Praxisnummer - wird gefiltert bei Rufnummernweiterleitungen
+PRAXIS_NUMBER = "200893"
+
 # --- Dashboard Authentifizierung ---
 auth = HTTPBasicAuth()
 
@@ -817,6 +820,65 @@ def get_db():
     db.row_factory = sqlite3.Row  # Ermöglicht den Zugriff auf Spalten per Namen
     return db
 
+def find_real_phone_number(webhook_timestamp, time_window=300):
+    """
+    Sucht die echte Telefonnummer aus der FritzBox-Lookup-Tabelle.
+
+    Diese Funktion wird verwendet, wenn eine Rufnummerweiterleitung aktiv ist
+    und Placetel nur die Praxisnummer statt der echten Anrufernummer sendet.
+
+    Args:
+        webhook_timestamp: Unix-Timestamp des Webhooks
+        time_window: Zeitfenster in Sekunden (default: 5 Minuten)
+
+    Returns:
+        Echte Telefonnummer oder None
+    """
+    try:
+        db = get_db()
+        cursor = db.cursor()
+
+        # Suche Anrufe im Zeitfenster (±5 Minuten)
+        min_time = webhook_timestamp - time_window
+        max_time = webhook_timestamp + time_window
+
+        cursor.execute("""
+        SELECT caller_number, timestamp
+        FROM phone_lookup
+        WHERE timestamp BETWEEN ? AND ?
+        AND matched = 0
+        ORDER BY ABS(timestamp - ?) ASC
+        LIMIT 1
+        """, (min_time, max_time, webhook_timestamp))
+
+        result = cursor.fetchone()
+
+        if result:
+            caller_number = result['caller_number']
+
+            # Als "matched" markieren
+            cursor.execute("""
+            UPDATE phone_lookup
+            SET matched = 1
+            WHERE timestamp = ?
+            """, (result['timestamp'],))
+
+            db.commit()
+            db.close()
+
+            print(f"🔗 Echte Nummer aus FritzBox-Monitor gefunden: {caller_number}")
+            return caller_number
+
+        db.close()
+        return None
+
+    except sqlite3.OperationalError:
+        # Tabelle phone_lookup existiert nicht - FritzBox Monitor nicht aktiv
+        return None
+    except Exception as e:
+        print(f"Fehler beim Suchen der echten Nummer: {e}")
+        return None
+
 def init_db():
     """Initialisiert die Datenbank und erstellt die Tabelle, falls sie nicht existiert."""
     db = get_db()
@@ -836,6 +898,13 @@ def init_db():
         category TEXT
     );
     """)
+    cursor.execute("""
+    CREATE TABLE IF NOT EXISTS deleted_calls (
+        log_ts REAL PRIMARY KEY,
+        deleted_at INTEGER NOT NULL,
+        deleted_by TEXT
+    );
+    """)
     db.commit()
     db.close()
     print("Datenbank initialisiert.")
@@ -847,16 +916,22 @@ def import_logs_to_db():
 
     db = get_db()
     cursor = db.cursor()
-    
+
     with open(LOG_FILE, "r", encoding="utf-8") as f:
         for line in f:
             if not line.strip():
                 continue
-            
+
             try:
                 log_entry = json.loads(line)
                 log_ts = log_entry.get("ts")
                 if not log_ts: continue
+
+                # Check if this entry was deleted by a user
+                cursor.execute("SELECT log_ts FROM deleted_calls WHERE log_ts = ?", (log_ts,))
+                if cursor.fetchone() is not None:
+                    # Skip this entry - it was intentionally deleted
+                    continue
 
                 cursor.execute("SELECT id FROM calls WHERE log_ts = ?", (log_ts,))
                 if cursor.fetchone() is not None:
@@ -873,6 +948,18 @@ def import_logs_to_db():
                     else:
                         category_str = str(category_data)
 
+                # Get phone number - check if it's the practice number (from call forwarding)
+                phone_number = body.get("phone")
+
+                # If phone contains practice number, try to find real caller number from FritzBox monitor
+                if phone_number and PRAXIS_NUMBER in phone_number:
+                    real_number = find_real_phone_number(int(log_ts))
+
+                    if real_number:
+                        phone_number = real_number
+                    else:
+                        phone_number = "Weiterleitung (Praxis)"
+
                 cursor.execute("""
                 INSERT INTO calls (log_ts, timestamp, caller_name, caller_gender, caller_dob, phone, call_reason, insurance_provider, category)
                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
@@ -882,7 +969,7 @@ def import_logs_to_db():
                     body.get("caller_name"),
                     body.get("caller_gender"),
                     body.get("caller_dob"),
-                    body.get("phone"),
+                    phone_number,
                     body.get("call_reason"),
                     body.get("insurance_provider"),
                     category_str
@@ -949,6 +1036,21 @@ def placetel_webhook():
             else:
                 category_str = str(category_data)
 
+        # Get phone number - check if it's the practice number (from call forwarding)
+        phone_number = data.get("phone")
+
+        # If phone contains practice number, try to find real caller number from FritzBox monitor
+        if phone_number and PRAXIS_NUMBER in phone_number:
+            print(f"⚠️  Praxisnummer erkannt in Webhook: {phone_number}")
+            real_number = find_real_phone_number(int(log_ts))
+
+            if real_number:
+                phone_number = real_number
+                print(f"✅ Ersetzt durch echte Nummer: {real_number}")
+            else:
+                print(f"ℹ️  Keine echte Nummer gefunden - verwende 'Weiterleitung (Praxis)'")
+                phone_number = "Weiterleitung (Praxis)"
+
         cursor.execute("""
         INSERT INTO calls (log_ts, timestamp, caller_name, caller_gender, caller_dob, phone, call_reason, insurance_provider, category)
         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
@@ -958,7 +1060,7 @@ def placetel_webhook():
             data.get("caller_name"),
             data.get("caller_gender"),
             data.get("caller_dob"),
-            data.get("phone"),
+            phone_number,
             data.get("call_reason"),
             data.get("insurance_provider"),
             category_str
@@ -1014,14 +1116,29 @@ def delete_call(call_id):
     """Löscht einen Anruf aus der Datenbank."""
     db = get_db()
     cursor = db.cursor()
-    cursor.execute("DELETE FROM calls WHERE id = ?", (call_id,))
-    db.commit()
 
-    if cursor.rowcount == 0:
+    # First, retrieve the log_ts value before deleting
+    cursor.execute("SELECT log_ts FROM calls WHERE id = ?", (call_id,))
+    result = cursor.fetchone()
+
+    if result is None:
         db.close()
         return jsonify({"status": "error", "message": "Call not found"}), 404
 
+    log_ts = result['log_ts']
+
+    # Insert into deleted_calls table to track this deletion
+    cursor.execute("""
+    INSERT OR IGNORE INTO deleted_calls (log_ts, deleted_at, deleted_by)
+    VALUES (?, ?, ?)
+    """, (log_ts, int(time.time()), auth.current_user()))
+
+    # Now delete the call
+    cursor.execute("DELETE FROM calls WHERE id = ?", (call_id,))
+    db.commit()
     db.close()
+
+    print(f"Anruf gelöscht und in deleted_calls gespeichert: log_ts={log_ts}")
     return jsonify({"status": "ok"})
 
 @app.post("/import-logs")

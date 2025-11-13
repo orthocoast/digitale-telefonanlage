@@ -1,0 +1,5 @@
+# Python Dependencies für Digitale Telefonanlage
+# Installation: pip3 install -r requirements.txt
+
+Flask>=2.3.0
+Flask-HTTPAuth>=4.8.0

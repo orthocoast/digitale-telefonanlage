@@ -95,13 +95,63 @@ Die Anwendung implementiert folgende Sicherheitsmaßnahmen:
 
 ## 6. Wichtige Dateien
 
+### Anwendungsdateien
 - `webhook_server_dev.py`: Das **Entwicklungsskript**. Alle neuen Features und Änderungen werden hier implementiert und getestet.
 - `webhook_server_prod.py`: Das **Produktionsskript**. Es repräsentiert die stabile, für den Einsatz freigegebene Version der Anwendung.
 - `database.db`: Die SQLite-Datenbankdatei.
 - `placetel_logs.jsonl`: Die Roh-Logdatei aller Webhook-Events.
 - `.env.example`: Vorlage für die Konfigurationsdatei mit Environment Variables.
+
+### Installation & Migration
+- `install.sh`: **Automatisches Installationsskript** für neue Server/Rechner
+- `MIGRATION.md`: **Vollständiger Migrationsleitfaden** mit Checklisten und Troubleshooting
+- `requirements.txt`: Python-Abhängigkeiten für einfache Installation
+- `telefonanlage.service.template`: Systemd-Service-Template für Linux-Server
+- `start_dev.sh` / `start_prod.sh`: Einfache Start-Skripte mit automatischem .env-Loading
+
+### Dokumentation
 - `call-dashboard-bauplan.md`: Das ursprüngliche, detaillierte Planungsdokument für die Architektur.
 - `GEMINI.md`: Dokumentation über den Entwicklungsprozess mit dem Gemini-Agenten.
+
+## 6.1. Migration auf einen neuen Server
+
+### Schnellstart: Automatische Installation
+
+Wenn Sie die Anwendung auf einen neuen Server umziehen möchten:
+
+1. **Dateien auf den neuen Server übertragen:**
+   ```bash
+   scp -r /pfad/zum/projekt user@neuer-server:/opt/telefonanlage
+   ```
+
+2. **Installationsskript ausführen:**
+   ```bash
+   cd /opt/telefonanlage
+   chmod +x install.sh
+   ./install.sh
+   ```
+
+Das Installationsskript übernimmt automatisch:
+- Installation aller Python-Abhängigkeiten
+- Konfiguration der `.env` Datei
+- Einrichtung eines systemd-Services (optional, nur Linux)
+- Firewall-Hinweise und Tests
+
+**Für eine detaillierte Migrations-Anleitung mit Checklisten siehe:** `MIGRATION.md`
+
+### Alternative: Manuelle Installation mit requirements.txt
+
+```bash
+# Python-Abhängigkeiten installieren
+pip3 install -r requirements.txt
+
+# Environment-Variablen konfigurieren
+cp .env.example .env
+nano .env  # Werte eintragen
+
+# Server starten
+./start_prod.sh
+```
 
 ## 7. Anleitung zum Starten
 
@@ -109,10 +159,16 @@ Um die Anwendung (im Entwicklungsmodus) zu starten, folgen Sie diesen Schritten:
 
 ### Schritt 1: Voraussetzungen installieren
 
-Stellen Sie sicher, dass Python 3 auf Ihrem System installiert ist. Installieren Sie dann die benötigte Python-Bibliothek mit `pip`:
+Stellen Sie sicher, dass Python 3 auf Ihrem System installiert ist. Installieren Sie dann die benötigten Python-Bibliotheken:
 
+**Option A: Mit requirements.txt (empfohlen)**
 ```bash
-pip install flask Flask-HTTPAuth
+pip3 install -r requirements.txt
+```
+
+**Option B: Manuell**
+```bash
+pip3 install flask Flask-HTTPAuth
 ```
 
 ### Schritt 2: Environment Variables konfigurieren

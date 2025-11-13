@@ -1,0 +1,37 @@
+[Unit]
+Description=Digitale Telefonanlage Webhook Server
+Documentation=https://github.com/user/telefonanlage
+After=network.target
+
+[Service]
+Type=simple
+
+# WICHTIG: Passen Sie diese Werte an!
+User=IHR_BENUTZERNAME
+Group=IHR_BENUTZERNAME
+WorkingDirectory=/opt/telefonanlage
+
+# Environment-Datei mit Secrets
+EnvironmentFile=/opt/telefonanlage/.env
+
+# Python-Pfad und Server-Script
+ExecStart=/usr/bin/python3 /opt/telefonanlage/webhook_server_prod.py
+
+# Restart-Verhalten
+Restart=always
+RestartSec=10
+
+# Sicherheitseinstellungen (optional, aber empfohlen)
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/opt/telefonanlage
+
+# Logging
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=telefonanlage
+
+[Install]
+WantedBy=multi-user.target
